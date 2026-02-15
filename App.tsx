@@ -15,21 +15,25 @@ const App: React.FC = () => {
   const [attendance, setAttendance] = useState<AttendanceRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [isRegistering, setIsRegistering] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
 
   useEffect(() => {
     const initSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      setSession(session);
-      if (session?.user) await fetchTeacherProfile(session.user.id);
-      else setLoading(false);
+      const { data: { session: currentSession } } = await supabase.auth.getSession();
+      setSession(currentSession);
+      if (currentSession?.user) {
+        await fetchTeacherProfile(currentSession.user.id);
+      } else {
+        setLoading(false);
+      }
     };
 
     initSession();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      setSession(session);
-      if (session?.user) {
-        await fetchTeacherProfile(session.user.id);
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, newSession) => {
+      setSession(newSession);
+      if (newSession?.user) {
+        await fetchTeacherProfile(newSession.user.id);
       } else {
         setCurrentUser(null);
         setClasses([]);
@@ -43,12 +47,12 @@ const App: React.FC = () => {
   const fetchTeacherProfile = async (userId: string) => {
     setLoading(true);
     try {
-      // Tentativa de buscar o perfil (pode levar 1s para o trigger do banco terminar)
+      // Tentativa de buscar o perfil com retry (caso o trigger do banco demore 1-2s)
       let { data, error } = await supabase.from('teachers').select('*').eq('id', userId).single();
       
-      // Retry simples caso o trigger ainda esteja processando
       if (!data) {
-        await new Promise(resolve => setTimeout(resolve, 1500));
+        // Aguarda 2 segundos e tenta de novo (importante para novos cadastros)
+        await new Promise(resolve => setTimeout(resolve, 2000));
         const retry = await supabase.from('teachers').select('*').eq('id', userId).single();
         data = retry.data;
       }
@@ -57,10 +61,11 @@ const App: React.FC = () => {
         setCurrentUser(data);
         await fetchData(userId);
       } else {
-        console.error("Perfil do professor não encontrado no banco.");
+        setAuthError("Perfil não encontrado. Verifique se o banco de dados foi configurado corretamente.");
       }
     } catch (err) {
       console.error(err);
+      setAuthError("Erro ao carregar perfil.");
     } finally {
       setLoading(false);
     }
@@ -93,30 +98,37 @@ const App: React.FC = () => {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setAuthError(null);
     const fd = new FormData(e.currentTarget as HTMLFormElement);
     const { error } = await supabase.auth.signInWithPassword({
       email: fd.get('email') as string,
       password: fd.get('password') as string,
     });
-    if (error) { alert("Erro ao entrar: " + error.message); setLoading(false); }
+    if (error) { 
+      setAuthError(error.message); 
+      setLoading(false); 
+    }
   };
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setAuthError(null);
     const fd = new FormData(e.currentTarget as HTMLFormElement);
     const email = fd.get('email') as string;
     const name = fd.get('name') as string;
     
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email,
       password: fd.get('password') as string,
       options: { data: { name } }
     });
     
-    if (error) { alert(error.message); setLoading(false); }
-    else { 
-      alert('Conta criada com sucesso! Redirecionando para login...'); 
+    if (error) { 
+      setAuthError(error.message); 
+      setLoading(false); 
+    } else { 
+      alert('Cadastro realizado! Se você não conseguir entrar agora, verifique se recebeu um e-mail de confirmação ou aguarde 5 segundos.'); 
       setIsRegistering(false); 
       setLoading(false); 
     }
@@ -154,7 +166,7 @@ const App: React.FC = () => {
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-indigo-900 text-white font-bold animate-pulse">Iniciando Studio Ritmo Vertical...</div>;
 
-  if (!session) {
+  if (!session || !currentUser) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-indigo-900 p-4">
         <div className="max-w-md w-full bg-white rounded-3xl p-8 shadow-2xl">
@@ -162,6 +174,13 @@ const App: React.FC = () => {
              <h1 className="text-2xl font-black text-indigo-900">RITMO VERTICAL</h1>
              <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mt-1">Área do Professor</p>
           </div>
+
+          {authError && (
+            <div className="mb-4 p-3 bg-red-50 text-red-600 rounded-xl text-sm font-bold border border-red-100">
+              {authError}
+            </div>
+          )}
+
           <form onSubmit={isRegistering ? handleRegister : handleLogin} className="space-y-4">
             {isRegistering && (
               <input name="name" required placeholder="Seu Nome Completo" className="w-full p-4 bg-slate-50 border rounded-2xl outline-none" />
@@ -172,7 +191,7 @@ const App: React.FC = () => {
               {isRegistering ? 'Criar minha conta' : 'Acessar meu Painel'}
             </button>
           </form>
-          <button onClick={() => setIsRegistering(!isRegistering)} className="w-full mt-6 text-sm text-indigo-600 font-bold">
+          <button onClick={() => { setIsRegistering(!isRegistering); setAuthError(null); }} className="w-full mt-6 text-sm text-indigo-600 font-bold">
             {isRegistering ? 'Já sou cadastrado' : 'Primeiro acesso? Registre-se'}
           </button>
         </div>
@@ -189,17 +208,17 @@ const App: React.FC = () => {
         </div>
         <div className="flex items-center gap-4">
           <div className="text-right">
-            <div className="text-xs font-bold text-slate-800 leading-none">{currentUser?.name}</div>
-            <div className="text-[10px] text-indigo-500 font-bold uppercase tracking-wider">{currentUser?.modality}</div>
+            <div className="text-xs font-bold text-slate-800 leading-none">{currentUser.name}</div>
+            <div className="text-[10px] text-indigo-500 font-bold uppercase tracking-wider">{currentUser.modality}</div>
           </div>
-          <button onClick={() => supabase.auth.signOut()} className="text-slate-400 hover:text-red-500">
+          <button onClick={() => supabase.auth.signOut()} className="text-slate-400 hover:text-red-500 font-bold text-xs uppercase">
             Sair
           </button>
         </div>
       </header>
       <main className="max-w-6xl mx-auto p-4 md:p-10">
         {!activeClassId ? (
-          <TeacherDashboard teacher={currentUser!} classes={classes} onSelectClass={setActiveClassId} />
+          <TeacherDashboard teacher={currentUser} classes={classes} onSelectClass={setActiveClassId} />
         ) : (
           <ClassDetails
             activeClass={classes.find(c => c.id === activeClassId)!}
